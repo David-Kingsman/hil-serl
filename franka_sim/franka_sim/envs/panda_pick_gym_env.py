@@ -1,10 +1,12 @@
 from pathlib import Path
 from typing import Any, Literal, Tuple, Dict
 
+# import gym
 import gymnasium as gym
 import mujoco
 import numpy as np
 from gymnasium import spaces
+from gymnasium.spaces import Box
 
 try:
     import mujoco_py
@@ -12,6 +14,8 @@ except ImportError as e:
     MUJOCO_PY_IMPORT_ERROR = e
 else:
     MUJOCO_PY_IMPORT_ERROR = None
+# from mujoco.glfw import glfw
+from scipy.spatial.transform import Rotation
 
 from franka_sim.controllers import opspace
 from franka_sim.mujoco_gym_env import GymRenderingSpec, MujocoGymEnv
@@ -20,7 +24,7 @@ _HERE = Path(__file__).parent
 _XML_PATH = _HERE / "xmls" / "arena.xml"
 _PANDA_HOME = np.asarray((0, -0.785, 0, -2.35, 0, 1.57, np.pi / 4))
 _CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0], [0.6, 0.3, 0.5]])
-_SAMPLING_BOUNDS = np.asarray([[0.25, -0.25], [0.55, 0.25]])
+_SAMPLING_BOUNDS = np.asarray([[0.3, -0.15], [0.5, 0.15]])
 
 
 class PandaPickCubeGymEnv(MujocoGymEnv):
@@ -28,16 +32,18 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
 
     def __init__(
         self,
-        action_scale: np.ndarray = np.asarray([0.1, 1]),
+        action_scale: np.ndarray = np.asarray([0.05, 1]),
         seed: int = 0,
         control_dt: float = 0.02,
         physics_dt: float = 0.002,
-        time_limit: float = 10.0,
+        time_limit: float = 20.0,
         render_spec: GymRenderingSpec = GymRenderingSpec(),
         render_mode: Literal["rgb_array", "human"] = "rgb_array",
         image_obs: bool = False,
+        reward_type: str = "sparse",
     ):
         self._action_scale = action_scale
+        self.reward_type = reward_type
 
         super().__init__(
             xml_path=_XML_PATH,
@@ -57,9 +63,13 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         }
 
         self.render_mode = render_mode
-        self.camera_id = (0, 1)
+        camera_name_1 = "front"
+        camera_name_2 = "handcam_rgb"
+        camera_id_1 = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name_1)
+        camera_id_2 = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name_2)
+        self.camera_id = (camera_id_1, camera_id_2)
         self.image_obs = image_obs
-
+        
         # Caching.
         self._panda_dof_ids = np.asarray(
             [self._model.joint(f"joint{i}").id for i in range(1, 8)]
@@ -71,25 +81,18 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         self._pinch_site_id = self._model.site("pinch").id
         self._block_z = self._model.geom("block").size[2]
 
-        self.observation_space = gym.spaces.Dict(
+        self.observation_space = spaces.Dict(
             {
-                "state": gym.spaces.Dict(
+                "state": spaces.Dict(
                     {
-                        "panda/tcp_pos": spaces.Box(
-                            -np.inf, np.inf, shape=(3,), dtype=np.float32
+                        "tcp_pose": spaces.Box(
+                            -np.inf, np.inf, shape=(7,), dtype=np.float32
                         ),
-                        "panda/tcp_vel": spaces.Box(
-                            -np.inf, np.inf, shape=(3,), dtype=np.float32
+                        "tcp_vel": spaces.Box(
+                            -np.inf, np.inf, shape=(6,), dtype=np.float32
                         ),
-                        "panda/gripper_pos": spaces.Box(
-                            -np.inf, np.inf, shape=(1,), dtype=np.float32
-                        ),
-                        # "panda/joint_pos": spaces.Box(-np.inf, np.inf, shape=(7,), dtype=np.float32),
-                        # "panda/joint_vel": spaces.Box(-np.inf, np.inf, shape=(7,), dtype=np.float32),
-                        # "panda/joint_torque": specs.Array(shape=(21,), dtype=np.float32),
-                        # "panda/wrist_force": specs.Array(shape=(3,), dtype=np.float32),
-                        "block_pos": spaces.Box(
-                            -np.inf, np.inf, shape=(3,), dtype=np.float32
+                        "gripper_pose": spaces.Box(
+                            -1, 1, shape=(1,), dtype=np.float32
                         ),
                     }
                 ),
@@ -97,30 +100,30 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         )
 
         if self.image_obs:
-            self.observation_space = gym.spaces.Dict(
+            self.observation_space = spaces.Dict(
                 {
-                    "state": gym.spaces.Dict(
+                    "state": spaces.Dict(
                         {
-                            "panda/tcp_pos": spaces.Box(
-                                -np.inf, np.inf, shape=(3,), dtype=np.float32
+                            "tcp_pose": spaces.Box(
+                                -np.inf, np.inf, shape=(7,), dtype=np.float32
                             ),
-                            "panda/tcp_vel": spaces.Box(
-                                -np.inf, np.inf, shape=(3,), dtype=np.float32
+                            "tcp_vel": spaces.Box(
+                                -np.inf, np.inf, shape=(6,), dtype=np.float32
                             ),
-                            "panda/gripper_pos": spaces.Box(
-                                -np.inf, np.inf, shape=(1,), dtype=np.float32
+                            "gripper_pose": spaces.Box(
+                                -1, 1, shape=(1,), dtype=np.float32
                             ),
                         }
                     ),
-                    "images": gym.spaces.Dict(
+                    "images": spaces.Dict(
                         {
-                            "front": gym.spaces.Box(
+                            "front": spaces.Box(
                                 low=0,
                                 high=255,
                                 shape=(render_spec.height, render_spec.width, 3),
                                 dtype=np.uint8,
                             ),
-                            "wrist": gym.spaces.Box(
+                            "wrist": spaces.Box(
                                 low=0,
                                 high=255,
                                 shape=(render_spec.height, render_spec.width, 3),
@@ -131,21 +134,18 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
                 }
             )
 
-        self.action_space = gym.spaces.Box(
-            low=np.asarray([-1.0, -1.0, -1.0, -1.0]),
-            high=np.asarray([1.0, 1.0, 1.0, 1.0]),
+        self.action_space = spaces.Box(
+            low=np.asarray([-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]),
+            high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             dtype=np.float32,
         )
 
-        # NOTE: gymnasium is used here since MujocoRenderer is not available in gym. It
-        # is possible to add a similar viewer feature with gym, but that can be a future TODO
-        from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
-
-        self._viewer = MujocoRenderer(
+        self._viewer = mujoco.Renderer(
             self.model,
-            self.data,
+            height=render_spec.height,
+            width=render_spec.width
         )
-        self._viewer.render(self.render_mode)
+        self._viewer.render()
 
     def reset(
         self, seed=None, **kwargs
@@ -188,13 +188,19 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             truncated: bool,
             info: dict[str, Any]
         """
-        x, y, z, grasp = action
+        x, y, z, rx, ry, rz, grasp = action
 
         # Set the mocap position.
         pos = self._data.mocap_pos[0].copy()
         dpos = np.asarray([x, y, z]) * self._action_scale[0]
         npos = np.clip(pos + dpos, *_CARTESIAN_BOUNDS)
         self._data.mocap_pos[0] = npos
+
+        # Set the mocap orientation.
+        # ori = self._data.mocap_quat[0].copy()
+        # dori = np.asarray([rx, ry, rz]) * self._action_scale[0]
+        # nori = (Rotation.from_euler("xyz", dori) * Rotation.from_quat(ori)).as_quat()
+        # self._data.mocap_quat[0] = nori
 
         # Set gripper grasp.
         g = self._data.ctrl[self._gripper_ctrl_id] / 255
@@ -215,55 +221,41 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             )
             self._data.ctrl[self._panda_ctrl_ids] = tau
             mujoco.mj_step(self._model, self._data)
-
         obs = self._compute_observation()
         rew = self._compute_reward()
-        terminated = self.time_limit_exceeded()
+        success = self._is_success()
+        block_pos = self._data.sensor("block_pos").data
+        outside_bounds = np.any(block_pos[:2] < (_SAMPLING_BOUNDS[0] - 0.05)) or np.any(block_pos[:2] > (_SAMPLING_BOUNDS[1] + 0.05))
+        terminated = self.time_limit_exceeded() or success or outside_bounds
 
-        return obs, rew, terminated, False, {}
+        return obs, rew, terminated, False, {"succeed": success}
 
     def render(self):
         rendered_frames = []
         for cam_id in self.camera_id:
+            self._viewer.update_scene(self.data, camera=cam_id)
             rendered_frames.append(
-                self._viewer.render(render_mode="rgb_array", camera_id=cam_id)
+                self._viewer.render()
             )
         return rendered_frames
-
-    # Helper methods.
 
     def _compute_observation(self) -> dict:
         obs = {}
         obs["state"] = {}
 
         tcp_pos = self._data.sensor("2f85/pinch_pos").data
-        obs["state"]["panda/tcp_pos"] = tcp_pos.astype(np.float32)
+        tcp_quat = self._data.sensor("2f85/pinch_quat").data
+
+        obs["state"]["tcp_pose"] = np.concatenate([tcp_pos, tcp_quat]).astype(np.float32)
 
         tcp_vel = self._data.sensor("2f85/pinch_vel").data
-        obs["state"]["panda/tcp_vel"] = tcp_vel.astype(np.float32)
+        tcp_angvel = self._data.sensor("2f85/pinch_angvel").data
+        obs["state"]["tcp_vel"] = np.concatenate([tcp_vel, tcp_angvel]).astype(np.float32)
 
-        gripper_pos = np.array(
+        gripper_pose = np.array(
             self._data.ctrl[self._gripper_ctrl_id] / 255, dtype=np.float32
         )
-        obs["state"]["panda/gripper_pos"] = gripper_pos
-
-        # joint_pos = np.stack(
-        #     [self._data.sensor(f"panda/joint{i}_pos").data for i in range(1, 8)],
-        # ).ravel()
-        # obs["panda/joint_pos"] = joint_pos.astype(np.float32)
-
-        # joint_vel = np.stack(
-        #     [self._data.sensor(f"panda/joint{i}_vel").data for i in range(1, 8)],
-        # ).ravel()
-        # obs["panda/joint_vel"] = joint_vel.astype(np.float32)
-
-        # joint_torque = np.stack(
-        # [self._data.sensor(f"panda/joint{i}_torque").data for i in range(1, 8)],
-        # ).ravel()
-        # obs["panda/joint_torque"] = symlog(joint_torque.astype(np.float32))
-
-        # wrist_force = self._data.sensor("panda/wrist_force").data.astype(np.float32)
-        # obs["panda/wrist_force"] = symlog(wrist_force.astype(np.float32))
+        obs["state"]["gripper_pose"] = gripper_pose
 
         if self.image_obs:
             obs["images"] = {}
@@ -272,20 +264,29 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             block_pos = self._data.sensor("block_pos").data.astype(np.float32)
             obs["state"]["block_pos"] = block_pos
 
-        if self.render_mode == "human":
-            self._viewer.render(self.render_mode)
-
         return obs
 
     def _compute_reward(self) -> float:
+        if self.reward_type == "dense":
+            block_pos = self._data.sensor("block_pos").data
+            tcp_pos = self._data.sensor("2f85/pinch_pos").data
+            dist = np.linalg.norm(block_pos - tcp_pos)
+            r_close = np.exp(-20 * dist)
+            r_lift = (block_pos[2] - self._z_init) / (self._z_success - self._z_init)
+            r_lift = np.clip(r_lift, 0.0, 1.0)
+            rew = 0.3 * r_close + 0.7 * r_lift
+            return rew
+        else:
+            block_pos = self._data.sensor("block_pos").data
+            lift = block_pos[2] - self._z_init
+            return float(lift > 0.2)
+
+    def _is_success(self) -> bool:
         block_pos = self._data.sensor("block_pos").data
         tcp_pos = self._data.sensor("2f85/pinch_pos").data
         dist = np.linalg.norm(block_pos - tcp_pos)
-        r_close = np.exp(-20 * dist)
-        r_lift = (block_pos[2] - self._z_init) / (self._z_success - self._z_init)
-        r_lift = np.clip(r_lift, 0.0, 1.0)
-        rew = 0.3 * r_close + 0.7 * r_lift
-        return rew
+        lift = block_pos[2] - self._z_init
+        return dist < 0.05 and lift > 0.2
 
 
 if __name__ == "__main__":

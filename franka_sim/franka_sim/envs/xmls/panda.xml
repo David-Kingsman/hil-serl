@@ -395,5 +395,6 @@
     <framepos name="2f85/pinch_pos" objtype="site" objname="pinch"/>
     <framequat name="2f85/pinch_quat" objtype="site" objname="pinch"/>
     <framelinvel name="2f85/pinch_vel" objtype="site" objname="pinch"/>
+    <frameangvel name="2f85/pinch_angvel" objtype="site" objname="pinch"/>
   </sensor>
 </mujoco>

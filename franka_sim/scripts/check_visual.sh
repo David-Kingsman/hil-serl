@@ -1,0 +1,1 @@
+python /home/agilex/chenjin/hil-serl-sim/franka_sim/test/test_gym_env_human.py

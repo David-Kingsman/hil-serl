@@ -1,0 +1,1 @@
+python examples/record_success_fail_sim.py --exp_name pick_cube_sim --successes_needed 2000
