@@ -1,1 +1,0 @@
-python /home/agilex/chenjin/hil-serl-sim/examples/train_reward_classifier.py --exp_name pick_cube_sim
