@@ -150,17 +150,17 @@ class Gripper:
         return value
 
     @staticmethod
-    def _is_ack(data: str) -> bool:
-        return data == b"ack"
+    def _is_ack(data: bytes) -> bool:
+        return data.strip().lower() == b"ack"
 
     async def activate(self, auto_calibrate: bool = True) -> None:
         """Resets the activation flag in the gripper, and sets it back to one, clearing previous fault flags.
 
         :param auto_calibrate: Whether to calibrate the minimum and maximum positions based on actual motion.
         """
-        # clear and then reset ACT
-        await self._set_var(self.STA, 0)
-        await self._set_var(self.STA, 1)
+        # clear and then reset ACT (correct variable)
+        await self._set_var(self.ACT, 0)
+        await self._set_var(self.ACT, 1)
 
         # wait for activation to go through
         while not await self.is_active():
@@ -202,6 +202,11 @@ class Gripper:
     async def get_current_position(self) -> int:
         """Returns the current position as returned by the physical hardware."""
         return await self._get_var(self.POS)
+
+    async def get_object_status(self) -> ObjectStatus:
+        """Returns the object status reported by the gripper."""
+        obj_value = await self._get_var(self.OBJ)
+        return Gripper.ObjectStatus(obj_value)
 
     async def auto_calibrate(self, log: bool = True) -> None:
         """Attempts to calibrate the open and closed positions, by slowly closing and opening the gripper.

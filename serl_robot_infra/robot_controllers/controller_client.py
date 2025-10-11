@@ -1,12 +1,10 @@
 from sys import getsizeof
-
 import zmq
-import json
 import time
 import threading
 import asyncio
 import numpy as np
-# from ur_env.utils.vacuum_gripper import VacuumGripper
+
 from ur_env.utils.gripper import Gripper
 
 class ControllerClientWithGripper(threading.Thread):
@@ -74,7 +72,8 @@ class ControllerClientWithGripper(threading.Thread):
         return np.linalg.norm(self.get_state()["vel"], 2) > 0.001
 
     def _truncate_check(self):
-        max_force = np.linalg.norm(self.get_state()["force"]) > 100.
+        force = np.asarray(self.get_state().get("force", [0, 0, 0]))
+        max_force = np.linalg.norm(force) > 100.
         if max_force:  # TODO add better criteria
             self._is_truncated.set()
 
@@ -95,75 +94,66 @@ class ControllerClientWithGripper(threading.Thread):
 
     async def start_controllers(self):
         self.controller = ControllerClient(p_port=self.config.ZEROMQ_PUBLISHER_PORT, s_port=self.config.ZEROMQ_SUBSCRIBER_PORT)
-        # self.gripper = VacuumGripper(self.robot_ip)  # TODO: replace with Vacuum Gripper
         self.gripper = Gripper(self.robot_ip)
         await self.gripper.connect()
         await self.gripper.activate()
 
     async def send_gripper_command(self, force_release=False):
         if force_release:
-            # await self.gripper.automatic_release()  # vacuum gripper automatic release
-            # open fully
-            await self.gripper.move_and_wait_for_pos(self.gripper.get_open_position(), 64, 1)
+            # gripper release: open the gripper
+            speed = getattr(self.config, 'GRIPPER_SPEED', 64)
+            force = getattr(self.config, 'GRIPPER_FORCE', 50)
+            await self.gripper.move(self.gripper.get_open_position(), speed, force)
             self.target_grip[0] = 0.0
             return
 
-        timeout_exceeded = (time.monotonic() - self.gripper_timeout["last_grip"]) * 1000 > self.gripper_timeout["timeout"]
-        # grip when command positive and not currently gripping
+        timeout_exceeded = (time.monotonic() - self.gripper_timeout["last_grip"]) * 1000 > self.gripper_timeout[
+            "timeout"]
+        # target grip above threshold and timeout exceeded and not gripping something already
         if self.target_grip[0] > 0.5 and timeout_exceeded and self.gripper_state[1] < 0.5:
-            # await self.gripper.automatic_grip()   # vacuum gripper automatic grip
-            await self.gripper.move_and_wait_for_pos(self.gripper.get_closed_position(), 64, 1)
+            # gripper grip: close the gripper
+            speed = getattr(self.config, 'GRIPPER_SPEED', 64)
+            force = getattr(self.config, 'GRIPPER_FORCE', 50)
+            await self.gripper.move(self.gripper.get_closed_position(), speed, force)
             self.target_grip[0] = 0.0
             self.gripper_timeout["last_grip"] = time.monotonic()
 
-        # release when command negative and currently gripping
+        # release if below neg threshold and gripper activated (grip_status not zero)
         elif self.target_grip[0] < -0.5 and abs(self.gripper_state[1]) > 0.5:
-            # await self.gripper.automatic_release()  # vacuum gripper automatic release
-            await self.gripper.move_and_wait_for_pos(self.gripper.get_open_position(), 64, 1)
+            # gripper release: open the gripper
+            speed = getattr(self.config, 'GRIPPER_SPEED', 64)
+            force = getattr(self.config, 'GRIPPER_FORCE', 50)
+            await self.gripper.move(self.gripper.get_open_position(), speed, force)
             self.target_grip[0] = 0.0
+            # print("release")
 
     async def _go_to_reset_pose(self):
-        # first disable vaccum gripper
+        # first release mechanical gripper
         if self.gripper and self._release_gripper.is_set():      # TODO how to handle this
             await self.send_gripper_command(force_release=True)
-            time.sleep(0.01)
+            await asyncio.sleep(0.01)
         self.controller.send_reset_joint_angles(self.reset_angles)
 
         # wait for the controller to finish
-        time.sleep(0.5)
-        while np.linalg.norm(np.asarray(self.get_state()["Qd"])) > 0.01:
-            time.sleep(1./self.frequency)
+        await asyncio.sleep(0.5)
+        while np.linalg.norm(np.asarray(self.get_state().get("Qd", np.zeros(6)))) > 0.01:
+            await asyncio.sleep(1./self.frequency)
         self._is_truncated.clear()
         self._reset.clear()
 
     async def _update_gripper_state(self):
-        # vacuum gripper update gripper state
-        # pressure = await self.gripper.get_current_pressure()   # vacuum gripper get current pressure
-        # obj_status = await self.gripper.get_object_status()   # vacuum gripper get object status
-        # grip_status = [-1., 1., 1., 0.][obj_status.value]
-        # pressure = pressure if pressure < 99 else 0     # 100 no obj, 99 sucking empty, so they are ignored
-        # # grip status, 0->neutral, -1->bad (sucking but no obj), 1-> good (sucking and obj)
-        # grip_status = 1. if pressure > 0 else grip_status
-        # pressure /= 98.  # pressure between [0, 1]
-
-        # For two-finger gripper, use position and OBJ status to infer grasp state
         position = await self.gripper.get_current_position()
-        obj_status = await self.gripper._get_var(self.gripper.OBJ)  # uses same channel to read status
-        # normalized closure from [open, closed]
-        min_pos = self.gripper.get_open_position()
-        max_pos = self.gripper.get_closed_position()
-        denom = max(1, max_pos - min_pos)
-        normalized_closure = (position - min_pos) / denom
-        # grip status: 1 if contact (outer/inner), 0 if at dest no obj, -1 if moving (approx)
-        if obj_status in (Gripper.ObjectStatus.STOPPED_OUTER_OBJECT.value, Gripper.ObjectStatus.STOPPED_INNER_OBJECT.value):
-            grip_status = 1.0
-        elif obj_status == Gripper.ObjectStatus.AT_DEST.value:
-            grip_status = 0.0
-        else:
-            grip_status = -1.0
+        obj_status = await self.gripper.get_object_status()
+        
+        # gripper state mapping: 0->moving, 1->stopped_outer, 2->stopped_inner, 3->at_dest
+        grip_status = [0., 1., 1., 0.][obj_status.value]  # 0->neutral, 1->gripped
+        
+        # convert position to 0-1 range (0=fully open, 1=fully closed)
+        position_normalized = (position - self.gripper.get_min_position()) / (self.gripper.get_max_position() - self.gripper.get_min_position())
+        position_normalized = max(0.0, min(1.0, position_normalized))
+        
         with self.lock:
-            # self.gripper_state[:] = [pressure, grip_status]  # vacuum gripper update gripper state
-            self.gripper_state[:] = [float(normalized_closure), float(grip_status)]
+            self.gripper_state[:] = [position_normalized, grip_status]
 
     def get_state(self):
         with self.lock:
@@ -177,14 +167,19 @@ class ControllerClientWithGripper(threading.Thread):
 
     async def run_async(self):
         await self.start_controllers()
-        time.sleep(0.5)     # wait for controller
+        await asyncio.sleep(0.5)     # wait for controller
 
         try:
             self._is_ready.set()
             t_next = time.monotonic()
             while not self.stopped():
                 t_next += 1. / self.frequency
-                await asyncio.sleep(t_next - time.monotonic())
+                delay = t_next - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                else:
+                    # if behind, reset the baseline to avoid negative sleep
+                    t_next = time.monotonic()
 
                 await self._update_gripper_state()
                 await self.send_gripper_command()
@@ -204,12 +199,12 @@ class ControllerClientWithGripper(threading.Thread):
             # release gripper, controller stays open
             if self.gripper:
                 await self.send_gripper_command(force_release=True)
-                time.sleep(0.05)
+                await asyncio.sleep(0.05)
 
 
 class ControllerClient:
     """
-    Sends target poses to the C++ UR5 robot controller using ZeroMQ.
+    Sends target poses to the C++ UR30 robot controller using ZeroMQ.
     The CLient is non-blocking, so it does not need another thread.
 
     Args:
@@ -227,6 +222,19 @@ class ControllerClient:
         self.subscriber.connect(f"tcp://{ip}:{s_port}")
         self.subscriber.setsockopt_string(zmq.SUBSCRIBE, "")        # sub to all
 
+        # add poller to avoid blocking
+        self.poller = zmq.Poller()
+        self.poller.register(self.subscriber, zmq.POLLIN)
+        
+        # default state to avoid KeyError
+        self._last_state = {
+            "is_truncated": 0, 
+            "pos": [0, 0, 0], 
+            "vel": [0, 0, 0], 
+            "force": [0, 0, 0],
+            "Qd": [0, 0, 0, 0, 0, 0]
+        }
+
         self.target_pose = np.zeros((7,))
 
     def send_target_pose(self, pose: np.ndarray):
@@ -243,5 +251,12 @@ class ControllerClient:
         cmd = {"target_q": joint_angles.astype(float).tolist()}
         self.publisher.send_json(cmd)
 
-    def get_state(self):
-        return self.subscriber.recv_json()
+    def get_state(self, timeout_ms: int = 50):
+        """get robot state, using poll to avoid blocking"""
+        socks = dict(self.poller.poll(timeout_ms))
+        if self.subscriber in socks and socks[self.subscriber] == zmq.POLLIN:
+            try:
+                self._last_state = self.subscriber.recv_json(zmq.NOBLOCK)
+            except zmq.Again:
+                pass  
+        return self._last_state
