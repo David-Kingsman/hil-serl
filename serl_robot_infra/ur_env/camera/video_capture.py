@@ -1,7 +1,7 @@
 import queue
 import threading
 import time
-
+import numpy as np
 
 class VideoCapture:
     def __init__(self, cap, name=None):
@@ -10,17 +10,14 @@ class VideoCapture:
         self.name = name
         self.q = queue.Queue()
         self.cap = cap
-        self.t = threading.Thread(target=self._reader, daemon=True)
-        self.t.daemon = True
+        self.t = threading.Thread(target=self._reader)
+        self.t.daemon = False
         self.enable = True
         self.t.start()
 
-        # read frames as soon as they are available, keeping only most recent one
-
     def _reader(self):
         while self.enable:
-            time.sleep(0.01)
-            ret, frame, timestamp = self.cap.read()
+            ret, frame = self.cap.read()
             if not ret:
                 break
             if not self.q.empty():
@@ -28,9 +25,10 @@ class VideoCapture:
                     self.q.get_nowait()  # discard previous (unprocessed) frame
                 except queue.Empty:
                     pass
-            self.q.put((frame, timestamp))
+            self.q.put(frame)
 
-    def read(self) -> tuple:
+    def read(self):
+        # print(self.name, self.q.qsize())
         return self.q.get(timeout=5)
 
     def close(self):
