@@ -1,1 +1,1 @@
-from ur_env.envs.ur5_env import UR5Env, DefaultEnvConfig
+from ur_env.envs.ur30_env import UR30Env as UR5Env, DefaultEnvConfig
