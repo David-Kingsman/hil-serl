@@ -1,4 +1,3 @@
-from sys import getsizeof
 import zmq
 import time
 import threading
