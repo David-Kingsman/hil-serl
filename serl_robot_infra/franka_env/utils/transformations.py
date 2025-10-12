@@ -69,3 +69,10 @@ def construct_homogeneous_matrix_from_euler(tcp_pose):
     T[:3, 3] = translation
     T[3, 3] = 1
     return T
+
+def construct_rotation_matrix(tcp_pose):
+    """
+    Extract rotation matrix from tcp_pose (xyz + quat).
+    :args: tcp_pose: (x, y, z, qx, qy, qz, qw)
+    """
+    return R.from_quat(tcp_pose[3:]).as_matrix()
